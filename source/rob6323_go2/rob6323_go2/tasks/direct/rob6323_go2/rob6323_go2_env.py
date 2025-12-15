@@ -29,6 +29,12 @@ class Rob6323Go2Env(DirectRLEnv):
     def __init__(self, cfg: Rob6323Go2EnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
+        # PD control parameters
+        self.Kp = torch.tensor([cfg.Kp] * 12, device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
+        self.Kd = torch.tensor([cfg.Kd] * 12, device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
+        self.motor_offsets = torch.zeros(self.num_envs, 12, device=self.device)
+        self.torque_limits = cfg.torque_limits
+
         # Joint position command (deviation from default joint positions)
         self._actions = torch.zeros(self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device)
         self._previous_actions = torch.zeros(
@@ -43,9 +49,15 @@ class Rob6323Go2Env(DirectRLEnv):
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             for key in [
                 "track_lin_vel_xy_exp",
-                "track_ang_vel_z_exp"
+                "track_ang_vel_z_exp",
+                "rew_action_rate",
+                "raibert_heuristic"
             ]
         }
+        # variables needed for action rate penalization
+        # Shape: (num_envs, action_dim, history_length)
+        self.last_actions = torch.zeros(self.num_envs, gym.spaces.flatdim(self.single_action_space), 3, dtype=torch.float, device=self.device, requires_grad=False)
+
         # Get specific body indices
         self._base_id, _ = self._contact_sensor.find_bodies("base")
         # self._feet_ids, _ = self._contact_sensor.find_bodies(".*foot")
@@ -75,8 +87,29 @@ class Rob6323Go2Env(DirectRLEnv):
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         self._actions = actions.clone()
         self._processed_actions = self.cfg.action_scale * self._actions + self.robot.data.default_joint_pos
+        self.desired_joint_pos = (
+            self.cfg.action_scale * self._actions
+            + self.robot.data.default_joint_pos
+        )
 
     def _apply_action(self) -> None:
+        # Compute PD torques
+        torques = torch.clip(
+            (
+                self.Kp * (
+                    self.desired_joint_pos 
+                    - self.robot.data.joint_pos 
+                )
+                - self.Kd * self.robot.data.joint_vel
+            ),
+        
+        -self.torque_limits,
+        self.torque_limits,
+        )
+    
+
+        # Apply torques to the robot
+        self.robot.set_joint_effort_target(torques)
         self.robot.set_joint_position_target(self._processed_actions)
 
     def _get_observations(self) -> dict:
@@ -107,10 +140,21 @@ class Rob6323Go2Env(DirectRLEnv):
         # yaw rate tracking
         yaw_rate_error = torch.square(self._commands[:, 2] - self.robot.data.root_ang_vel_b[:, 2])
         yaw_rate_error_mapped = torch.exp(-yaw_rate_error / 0.25)
+        # Action rate penalization
+        #First derivative (Current - Last)
+        rew_action_rate = torch.mean(torch.square(self._actions - self._previous_actions), dim=1) * (self.cfg.action_rate_reward_scale ** 2)
+        # Second derivative (Current - 2*Last + Last-2)
+        rew_action_rate += torch.sum(torch.square(self._actions - 2 * self.last_actions[:, :, 0] + self.last_actions[:, :, 1]), dim=1) * (self.cfg.action_scale ** 2)
+
+        # Update the prev action hist (roll buffer and insert new action)
+        self.last_actions = torch.roll(self.last_actions, 1, 2)
+        self.last_actions[:, :, 0] = self._actions[:]
+
         
         rewards = {
-            "track_lin_vel_xy_exp": lin_vel_error_mapped * self.cfg.lin_vel_reward_scale * self.step_dt,
-            "track_ang_vel_z_exp": yaw_rate_error_mapped * self.cfg.yaw_rate_reward_scale * self.step_dt,
+            "track_lin_vel_xy_exp": lin_vel_error_mapped * self.cfg.lin_vel_reward_scale,
+            "track_ang_vel_z_exp": yaw_rate_error_mapped * self.cfg.yaw_rate_reward_scale,
+            "rew_action_rate": rew_action_rate * self.cfg.action_rate_reward_scale,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         # Logging
@@ -123,7 +167,12 @@ class Rob6323Go2Env(DirectRLEnv):
         net_contact_forces = self._contact_sensor.data.net_forces_w_history
         cstr_termination_contacts = torch.any(torch.max(torch.norm(net_contact_forces[:, :, self._base_id], dim=-1), dim=1)[0] > 1.0, dim=1)
         cstr_upsidedown = self.robot.data.projected_gravity_b[:, 2] > 0
-        died = cstr_termination_contacts | cstr_upsidedown
+        # terminate if base is too low
+        base_height = self.robot.data.root_pos_w[:, 2]
+        cstr_base_height_min = base_height < self.cfg.base_height_min
+
+        died = cstr_termination_contacts | cstr_upsidedown | cstr_base_height_min
+
         return died, time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
@@ -146,6 +195,10 @@ class Rob6323Go2Env(DirectRLEnv):
         self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+
+        # Reset last actions history
+        self.last_actions[env_ids] = 0.0
+    
         # Logging
         extras = dict()
         for key in self._episode_sums.keys():
