@@ -17,7 +17,7 @@ from isaaclab.sensors import ContactSensorCfg
 from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.markers.config import BLUE_ARROW_X_MARKER_CFG, FRAME_MARKER_CFG, GREEN_ARROW_X_MARKER_CFG
 from isaaclab.actuators import ImplicitActuatorCfg
-
+import torch
 
 
 @configclass
@@ -31,6 +31,22 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     observation_space = 48
     state_space = 0
     debug_vis = True
+
+    observation_space = 48 + 4 
+
+    raibert_heuristic_reward_scale = -10.0
+    feet_clearance_reward_scale = -30.0
+    tracking_contacts_shaped_force_reward_scale = 4.0
+
+    #  Additional reward scales
+    orient_reward_scale = -5.0
+    lin_vel_z_reward_scale = -0.02
+    dof_vel_reward_scale = -0.0001
+    ang_vel_xy_reward_scale = -0.001
+
+    # reward scales
+    feet_clearance_reward_scale = -30.0
+    tracking_contacts_shaped_force_reward_scale = 4.0
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -98,3 +114,4 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     lin_vel_reward_scale = 1.0
     yaw_rate_reward_scale = 0.5 
     action_rate_reward_scale = -0.1
+
