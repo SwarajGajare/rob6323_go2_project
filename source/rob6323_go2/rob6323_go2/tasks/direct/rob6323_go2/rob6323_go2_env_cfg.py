@@ -17,8 +17,6 @@ from isaaclab.sensors import ContactSensorCfg
 from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.markers.config import BLUE_ARROW_X_MARKER_CFG, FRAME_MARKER_CFG, GREEN_ARROW_X_MARKER_CFG
 from isaaclab.actuators import ImplicitActuatorCfg
-import torch
-
 
 @configclass
 class Rob6323Go2EnvCfg(DirectRLEnvCfg):
@@ -28,27 +26,26 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     # - spaces definition
     action_scale = 0.25
     action_space = 12
-    observation_space = 48
+    observation_space = 48 + 4
     state_space = 0
     debug_vis = True
 
-    observation_space = 48 + 4 
-
+    # Raibert Params
     raibert_heuristic_reward_scale = -10.0
-    feet_clearance_reward_scale = -30.0
-    tracking_contacts_shaped_force_reward_scale = 4.0
 
-    #  Additional reward scales
+    # Reward scales for non-flat body orientation, bouncing, excess joint vel, body roll and pitching
     orient_reward_scale = -5.0
     lin_vel_z_reward_scale = -0.02
     dof_vel_reward_scale = -0.0001
-    ang_vel_xy_reward_scale = -0.001
+    ang_vel_xy_reward_scale = -0.01 #-0.0001
 
-    # reward scales
+    # Critical rewards for legged locomotion
     feet_clearance_reward_scale = -30.0
     tracking_contacts_shaped_force_reward_scale = 4.0
 
-    # simulation
+    pitch_nose_down_reward_scale = -5.0
+
+    # Simulation
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 200,
         render_interval=decimation,
@@ -73,15 +70,14 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
         ),
         debug_vis=False,
     )
+    # robot(s)
+    robot_cfg: ArticulationCfg = UNITREE_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
     # PD control gains
     Kp = 20.0  # Proportional gain
     Kd = 0.5   # Derivative gain
     torque_limits = 100.0  # Max torque
-    base_height_min = 0.20
-    
-    # robot(s)
-    robot_cfg: ArticulationCfg = UNITREE_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+
     # "base_legs" is an arbitrary key we use to group these actuators
     robot_cfg.actuators["base_legs"] = ImplicitActuatorCfg(
         joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
@@ -111,7 +107,24 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     current_vel_visualizer_cfg.markers["arrow"].scale = (0.5, 0.5, 0.5)
 
     # reward scales
-    lin_vel_reward_scale = 1.0
-    yaw_rate_reward_scale = 0.5 
     action_rate_reward_scale = -0.1
+    lin_vel_reward_scale = 1.0
+    yaw_rate_reward_scale = 0.5
 
+    base_height_min = 0.20 # Terminate if base is lower than 20cm
+
+    stride_length_reward_scale = -2.0 
+    face_command_reward_scale = -5.0
+
+    contact_schedule_reward_scale = -2.0
+    air_time_reward_scale = 0.47
+
+    sym_tem_reward_scale   = 0.2 # 0.05 – 0.2
+    sym_mor_reward_scale   = 0.1 # 0.01 – 0.1
+    sym_total_reward_scale = 1.0 # 1.0
+
+    # Actuator friction randomization
+    friction_mu_v_range = (0.0, 0.3)
+    friction_Fs_range   = (0.0, 2.5)
+    friction_vel_scale  = 0.1   # tanh(qdot / friction_vel_scale)
+    enable_friction     = True
